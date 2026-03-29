@@ -32,7 +32,7 @@
     <PackageReference Include="Microsoft.Extensions.Localization" Version="6.0.28" />
     <PackageReference Include="MudBlazor" Version="6.19.1" />
     <PackageReference Include="NAudio" Version="2.2.1" />
-    <PackageReference Include="Refit" Version="7.2.22" />
+    <PackageReference Include="Refit" Version="8.0.0" />
     <PackageReference Include="System.Data.SQLite" Version="1.0.119" />
     <PackageReference Include="Websocket.Client" Version="5.2.0" />
     <PackageReference Include="WindowsAPICodePack-Shell" Version="1.1.1" />
