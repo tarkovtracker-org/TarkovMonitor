@@ -44,6 +44,7 @@ namespace TarkovMonitor
         public static Dictionary<string, string> Domains = new() {
             { "tarkovtracker.io", "TarkovTracker.io" },
             { "tarkovtracker.org", "TarkovTracker.org" },
+            { "http://localhost:8787", "Localhost (http://localhost:8787)" },
         };
 
         static TarkovTracker() {
@@ -52,7 +53,7 @@ namespace TarkovMonitor
 
         public static ITarkovTrackerAPI InitAPI()
         {
-            api = RestService.For<ITarkovTrackerAPI>($"https://{Properties.Settings.Default.tarkovTrackerDomain}/api/v2",
+            api = RestService.For<ITarkovTrackerAPI>(GetApiBaseUrl(Properties.Settings.Default.tarkovTrackerDomain),
                 new RefitSettings {
                     AuthorizationHeaderValueGetter = (rq, cr) => {
                         return Task.Run<string>(() => {
@@ -63,6 +64,34 @@ namespace TarkovMonitor
             );
             api.Client.DefaultRequestHeaders.UserAgent.TryParseAdd($"{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name} {System.Reflection.Assembly.GetExecutingAssembly().GetName().Version}");
             return api;
+        }
+
+        internal static string GetBaseUrl(string domain)
+        {
+            var normalized = (domain ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                normalized = "tarkovtracker.io";
+            }
+            normalized = normalized.TrimEnd('/');
+            if (normalized.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                return normalized;
+            }
+            return $"https://{normalized}";
+        }
+
+        private static string GetApiBaseUrl(string domain)
+        {
+            return $"{GetBaseUrl(domain)}/api/v2";
+        }
+
+        public static bool IsLocalDomain(string domain)
+        {
+            var baseUrl = GetBaseUrl(domain);
+            return baseUrl.StartsWith("http://localhost", StringComparison.OrdinalIgnoreCase)
+                || baseUrl.StartsWith("http://127.0.0.1", StringComparison.OrdinalIgnoreCase);
         }
 
         public static string GetToken(string profileId)
@@ -102,7 +131,13 @@ namespace TarkovMonitor
             {
                 return Progress;
             }
-            if (newToken == "" || newToken.Length != 22)
+            if (string.IsNullOrEmpty(newToken))
+            {
+                ValidToken = false;
+                Progress = new();
+                return Progress;
+            }
+            if (!IsLocalDomain(Properties.Settings.Default.tarkovTrackerDomain) && newToken.Length != 22)
             {
                 ValidToken = false;
                 Progress = new();

@@ -456,7 +456,12 @@
     {
         get
         {
-            return !Regex.Match(TarkovTracker.GetToken(GameWatcher.CurrentProfile.Id), @"^(?:[A-Z]{3}_)?.{22}$").Success;
+            var token = TarkovTracker.GetToken(GameWatcher.CurrentProfile.Id);
+            if (TarkovTracker.IsLocalDomain(TarkovTrackerDomain))
+            {
+                return string.IsNullOrWhiteSpace(token);
+            }
+            return !Regex.Match(token, @"^(?:[A-Z]{3}_)?.{22}$").Success;
         }
         set
         {
@@ -548,7 +553,12 @@
 
     private async void TestToken()
     {
-        if (!Regex.Match(TarkovTrackerToken, @"^(?:[A-Z]{3}_)?.{22}$").Success)
+        if (string.IsNullOrWhiteSpace(TarkovTrackerToken))
+        {
+            messageLog.AddMessage("You must enter a valid TarkovTracker API token.", "warning");
+            return;
+        }
+        if (!TarkovTracker.IsLocalDomain(TarkovTrackerDomain) && !Regex.Match(TarkovTrackerToken, @"^(?:[A-Z]{3}_)?.{22}$").Success)
         {
             messageLog.AddMessage("You must enter a valid TarkovTracker API token.", "warning");
             return;
@@ -572,7 +582,7 @@
     }
 
     private void OpenTrackerSettings() {
-        OpenURL($"https://{TarkovTrackerDomain}/settings/");
+        OpenURL($"{TarkovTracker.GetBaseUrl(TarkovTrackerDomain)}/settings/");
     }
 
     private void OpenURL(string url)
