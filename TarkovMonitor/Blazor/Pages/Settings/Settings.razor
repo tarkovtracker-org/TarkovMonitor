@@ -456,7 +456,7 @@
     {
         get
         {
-            return TarkovTracker.GetToken(GameWatcher.CurrentProfile.Id).Length != 22;
+            return !Regex.Match(TarkovTracker.GetToken(GameWatcher.CurrentProfile.Id), @"^(?:[A-Z]{3}_)?.{22}$").Success;
         }
         set
         {
