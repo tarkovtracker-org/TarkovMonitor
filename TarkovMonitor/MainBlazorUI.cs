@@ -9,11 +9,49 @@ using System.ComponentModel;
 using MudBlazor;
 using Microsoft.Extensions.Localization;
 using System.Text.Json.Nodes;
+using System.Runtime.InteropServices;
 
 namespace TarkovMonitor
 {
     public partial class MainBlazorUI : Form
     {
+        private const int WmNcHitTest = 0x0084;
+        private const int WmNcCalcSize = 0x0083;
+        private const int WmNcLButtonDown = 0x00A1;
+        private const int HtCaption = 0x0002;
+        private const int HtClient = 0x0001;
+        private const int ResizeBorderWidth = 4;
+        private const int WsThickFrame = 0x00040000;
+        private const int WsMinimizeBox = 0x00020000;
+        private const int WsMaximizeBox = 0x00010000;
+        private const int DwmWindowCornerPreference = 33;
+        private const int DwmBorderColor = 34;
+        private const int DwmCaptionColor = 35;
+        private const int DwmRound = 2;
+        private const int TarkovBorderColor = 0x003B555F;
+        private const int TarkovHeaderColor = 0x002D2F2F;
+
+        public event EventHandler? WindowStateChanged;
+
+        [DllImport("user32.dll")]
+        private static extern bool ReleaseCapture();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int message, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr windowHandle, int attribute, ref int value, int valueSize);
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var parameters = base.CreateParams;
+                parameters.Style |= WsThickFrame | WsMinimizeBox | WsMaximizeBox;
+                return parameters;
+            }
+        }
+
         private readonly GameWatcher eft;
         private readonly MessageLog messageLog;
         private readonly LogRepository logRepository;
@@ -51,12 +89,15 @@ namespace TarkovMonitor
 
 			eft = new GameWatcher();
 
-            timersManager = new TimersManager(eft);
+            timersManager = new TimersManager(eft, messageLog);
 
             // Creates the dependency injection services which are the in-betweens for the Blazor interface and the rest of the C# application.
             var services = new ServiceCollection();
             services.AddWindowsFormsBlazorWebView();
-            services.AddMudServices();
+            services.AddMudServices(configuration =>
+            {
+                configuration.SnackbarConfiguration.PositionClass = Defaults.Classes.Position.TopCenter;
+            });
             services.AddLocalization();
             services.AddSingleton<LocalizationService>();
             services.AddSingleton<GameWatcher>(eft);
@@ -64,6 +105,7 @@ namespace TarkovMonitor
             services.AddSingleton<LogRepository>(logRepository);
             services.AddSingleton<GroupManager>(groupManager);
             services.AddSingleton<TimersManager>(timersManager);
+            services.AddSingleton<MainBlazorUI>(this);
 
             blazorWebView1.HostPage = "wwwroot\\index.html";
             var serviceProvider = services.BuildServiceProvider();
@@ -78,6 +120,7 @@ namespace TarkovMonitor
             eft.ExceptionThrown += Eft_ExceptionThrown;
             eft.RaidStarting += Eft_RaidStarting;
             eft.RaidStarted += Eft_RaidStart;
+            eft.RaidStopping += Eft_RaidStopping;
             eft.RaidExited += Eft_RaidExited;
             eft.RaidEnded += Eft_RaidEnded;
             eft.ExitedPostRaidMenus += Eft_ExitedPostRaidMenus;
@@ -166,6 +209,102 @@ namespace TarkovMonitor
             };
             scavCooldownTimer.Elapsed += ScavCooldownTimer_Elapsed;
         }
+
+        public bool IsMaximized => WindowState == FormWindowState.Maximized;
+
+        public void MinimizeWindow() => WindowState = FormWindowState.Minimized;
+
+        public void ToggleMaximizeWindow()
+        {
+            WindowState = IsMaximized ? FormWindowState.Normal : FormWindowState.Maximized;
+        }
+
+        public void CloseWindow() => Close();
+
+        public void BeginWindowDrag()
+        {
+            if (IsMaximized)
+            {
+                return;
+            }
+
+            ReleaseCapture();
+            SendMessage(Handle, WmNcLButtonDown, (IntPtr)HtCaption, IntPtr.Zero);
+        }
+
+        public void BeginWindowResize(int hitTest)
+        {
+            if (WindowState != FormWindowState.Normal || !IsResizeHit(hitTest))
+            {
+                return;
+            }
+
+            ReleaseCapture();
+            SendMessage(Handle, WmNcLButtonDown, (IntPtr)hitTest, IntPtr.Zero);
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+
+            var cornerPreference = DwmRound;
+            DwmSetWindowAttribute(Handle, DwmWindowCornerPreference, ref cornerPreference, sizeof(int));
+
+            var borderColor = TarkovBorderColor;
+            DwmSetWindowAttribute(Handle, DwmBorderColor, ref borderColor, sizeof(int));
+
+            var captionColor = TarkovHeaderColor;
+            DwmSetWindowAttribute(Handle, DwmCaptionColor, ref captionColor, sizeof(int));
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            if (message.Msg == WmNcCalcSize && message.WParam != IntPtr.Zero && WindowState == FormWindowState.Normal)
+            {
+                message.Result = IntPtr.Zero;
+                return;
+            }
+
+            if (message.Msg == WmNcHitTest && WindowState == FormWindowState.Normal)
+            {
+                message.Result = (IntPtr)GetResizeHitTest(GetScreenPosition(message.LParam));
+                return;
+            }
+
+            base.WndProc(ref message);
+        }
+
+        private static Point GetScreenPosition(IntPtr packedCoordinates)
+        {
+            var packedPosition = packedCoordinates.ToInt64();
+            return new Point(
+                unchecked((short)(packedPosition & 0xffff)),
+                unchecked((short)((packedPosition >> 16) & 0xffff)));
+        }
+
+        private int GetResizeHitTest(Point screenPosition)
+        {
+            var cursor = PointToClient(screenPosition);
+            var left = cursor.X <= ResizeBorderWidth;
+            var right = cursor.X >= ClientSize.Width - ResizeBorderWidth;
+            var top = cursor.Y <= ResizeBorderWidth;
+            var bottom = cursor.Y >= ClientSize.Height - ResizeBorderWidth;
+
+            return (left, right, top, bottom) switch
+            {
+                (true, _, true, _) => 13,
+                (_, true, true, _) => 14,
+                (true, _, _, true) => 16,
+                (_, true, _, true) => 17,
+                (true, _, _, _) => 10,
+                (_, true, _, _) => 11,
+                (_, _, true, _) => 12,
+                (_, _, _, true) => 15,
+                _ => HtClient
+            };
+        }
+
+        private static bool IsResizeHit(int hitTest) => hitTest is >= 10 and <= 17;
 
         private void Eft_ControlSettings(object? sender, ControlSettingsEventArgs e)
         {
@@ -277,23 +416,10 @@ namespace TarkovMonitor
             monMessage.Buttons.Add(screenshotButton);
         }
 
-        private void Eft_RaidEnded(object? sender, RaidInfoEventArgs e)
+        private async void Eft_RaidEnded(object? sender, RaidInfoEventArgs e)
         {
             inRaid = false;
-            
-            // Resume media on raid end
-            if (Properties.Settings.Default.pauseMediaOnRaid)
-            {
-                try
-                {
-                    messageLog.AddMessage("Playing media...", "info");
-                    MediaController.Play();
-                }
-                catch (Exception ex)
-                {
-                    messageLog.AddMessage($"Error resuming media: {ex.Message}", "exception");
-                }
-            }
+            await ResumeMediaAfterRaid();
             
             //groupManager.Stale = true;
             MonitorMessage monMessage = new($"Ended {e.RaidInfo.Map?.name} raid");
@@ -690,12 +816,52 @@ namespace TarkovMonitor
             messageLog.AddMessage($"Error {e.Context}: {e.Exception.Message}\n{e.Exception.StackTrace}", "exception");
         }
 
-        private void Eft_RaidStarting(object? sender, RaidInfoEventArgs e)
+        private async void Eft_RaidStarting(object? sender, RaidInfoEventArgs e)
         {
             if (Properties.Settings.Default.raidStartAlert)
             {
                 // always notify if the GameStarting event appeared
                 Sound.Play("raid_starting");
+            }
+
+            await PauseMediaForRaid();
+        }
+
+        private async Task PauseMediaForRaid()
+        {
+            if (!Properties.Settings.Default.pauseMediaOnRaid) return;
+
+            try
+            {
+                int pausedSessions = await MediaController.PauseAsync();
+                messageLog.AddMessage($"Paused {pausedSessions} music session(s)", "info");
+            }
+            catch (Exception ex)
+            {
+                messageLog.AddMessage($"Error pausing media: {ex.Message}", "exception");
+            }
+        }
+
+        private async void Eft_RaidStopping(object? sender, EventArgs e)
+        {
+            await ResumeMediaAfterRaid();
+        }
+
+        private async Task ResumeMediaAfterRaid()
+        {
+            if (!Properties.Settings.Default.pauseMediaOnRaid) return;
+
+            try
+            {
+                int resumedSessions = await MediaController.ResumeAsync();
+                if (resumedSessions > 0)
+                {
+                    messageLog.AddMessage($"Resumed {resumedSessions} music session(s)", "info");
+                }
+            }
+            catch (Exception ex)
+            {
+                messageLog.AddMessage($"Error resuming media: {ex.Message}", "exception");
             }
         }
 
@@ -704,18 +870,10 @@ namespace TarkovMonitor
             inRaid = true;
             Stats.AddRaid(e);
             
-            // Pause media on raid start
-            if (Properties.Settings.Default.pauseMediaOnRaid)
+            // GameStarting is not always logged for scav raids, so pause here as a fallback.
+            if (e.RaidInfo.StartingTime == null)
             {
-                try
-                {
-                    messageLog.AddMessage("Pausing media...", "info");
-                    MediaController.Pause();
-                }
-                catch (Exception ex)
-                {
-                    messageLog.AddMessage($"Error pausing media: {ex.Message}", "exception");
-                }
+                await PauseMediaForRaid();
             }
             
             if (!e.RaidInfo.Reconnected && e.RaidInfo.RaidType != RaidType.Unknown)
@@ -816,26 +974,12 @@ namespace TarkovMonitor
             }
         }
 
-        private void Eft_RaidExited(object? sender, RaidExitedEventArgs e)
+        private async void Eft_RaidExited(object? sender, RaidExitedEventArgs e)
         {
             //groupManager.Stale = true;
             runthroughTimer.Stop();
             inRaid = false;
-            
-            // Resume media on raid exit
-            if (Properties.Settings.Default.pauseMediaOnRaid)
-            {
-                try
-                {
-                    messageLog.AddMessage("Attempting to resume media...", "info");
-                    MediaController.Play();
-                    messageLog.AddMessage("Media resume command sent", "info");
-                }
-                catch (Exception ex)
-                {
-                    messageLog.AddMessage($"Error resuming media: {ex.Message}", "exception");
-                }
-            }
+            await ResumeMediaAfterRaid();
             
             try
             {
@@ -852,6 +996,7 @@ namespace TarkovMonitor
 
         private void MainBlazorUI_Resize(object sender, EventArgs e)
         {
+            WindowStateChanged?.Invoke(this, EventArgs.Empty);
             try
             {
                 if (this.WindowState == FormWindowState.Minimized && Properties.Settings.Default.minimizeToTray)
