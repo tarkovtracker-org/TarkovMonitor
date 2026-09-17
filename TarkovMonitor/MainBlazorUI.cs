@@ -61,6 +61,12 @@ namespace TarkovMonitor
         private readonly System.Timers.Timer scavCooldownTimer;
         private LocalizationService localizationService;
         private bool inRaid;
+        private bool startupMinimizePending;
+        private System.Windows.Forms.Timer? startupMinimizeFallbackTimer;
+
+        // Upper bound on how long startup waits for WebView2 to finish its first
+        // page load before minimizing anyway (e.g. WebView2 runtime problems).
+        private const int StartupMinimizeFallbackMilliseconds = 10000;
 
         public MainBlazorUI()
         {
@@ -70,6 +76,15 @@ namespace TarkovMonitor
                 Properties.Settings.Default.Upgrade();
                 Properties.Settings.Default.upgradeRequired = false;
                 Properties.Settings.Default.Save();
+            }
+            if (Properties.Settings.Default.minimizeAtStartup)
+            {
+                // The window must be shown (not minimized or hidden) while WebView2
+                // creates its browser, otherwise the UI can come back blank. Keep it
+                // fully transparent instead so nothing flashes on screen; OnShown
+                // minimizes it once the first page load has completed.
+                startupMinimizePending = true;
+                Opacity = 0;
             }
             this.TopMost = Properties.Settings.Default.stayOnTop;
             inRaid = false;
@@ -455,15 +470,94 @@ namespace TarkovMonitor
 
             try
             {
-                if (Properties.Settings.Default.minimizeAtStartup)
+                if (startupMinimizePending)
                 {
-
-                    WindowState = FormWindowState.Minimized;
+                    ScheduleStartupMinimize();
                 }
             }
             catch (Exception ex)
             {
                 messageLog.AddMessage($"Error minimizing at startup: {ex.Message} {ex.StackTrace}", "exception");
+            }
+        }
+
+        // "Minimize at startup" used to minimize the window synchronously from
+        // OnShown, i.e. before the asynchronous CoreWebView2 creation started by
+        // BlazorWebView had completed. With "Minimize to tray" also enabled the
+        // Resize handler then hid the form in the same call, so WebView2 ended
+        // up being created against a hidden, icon-sized (~160x28) host with
+        // IsVisible=false and never presented a frame after the window was
+        // restored: the user saw only the form's background color. (See
+        // MicrosoftEdge/WebView2Feedback #1077, #5171 and #5673 for the WebView2
+        // side of this.) Instead, keep the window shown-but-transparent until
+        // WebView2 exists and has completed its first navigation, then minimize.
+        private void ScheduleStartupMinimize()
+        {
+            var webView = blazorWebView1.WebView;
+
+            startupMinimizeFallbackTimer = new System.Windows.Forms.Timer
+            {
+                Interval = StartupMinimizeFallbackMilliseconds
+            };
+            startupMinimizeFallbackTimer.Tick += (_, _) => CompleteStartupMinimize();
+            startupMinimizeFallbackTimer.Start();
+
+            if (webView.CoreWebView2 != null)
+            {
+                webView.NavigationCompleted += StartupWebView_NavigationCompleted;
+                return;
+            }
+
+            webView.CoreWebView2InitializationCompleted += StartupWebView_CoreWebView2InitializationCompleted;
+        }
+
+        private void StartupWebView_CoreWebView2InitializationCompleted(object? sender, CoreWebView2InitializationCompletedEventArgs e)
+        {
+            var webView = blazorWebView1.WebView;
+            webView.CoreWebView2InitializationCompleted -= StartupWebView_CoreWebView2InitializationCompleted;
+
+            if (!e.IsSuccess)
+            {
+                // Nothing will ever render; don't keep an invisible window around.
+                CompleteStartupMinimize();
+                return;
+            }
+
+            webView.NavigationCompleted += StartupWebView_NavigationCompleted;
+        }
+
+        private void StartupWebView_NavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
+        {
+            blazorWebView1.WebView.NavigationCompleted -= StartupWebView_NavigationCompleted;
+
+            // Let WebView2 present the loaded document before the host is minimized.
+            BeginInvoke(new Action(CompleteStartupMinimize));
+        }
+
+        private void CompleteStartupMinimize()
+        {
+            startupMinimizeFallbackTimer?.Stop();
+            startupMinimizeFallbackTimer?.Dispose();
+            startupMinimizeFallbackTimer = null;
+
+            if (!startupMinimizePending || IsDisposed)
+            {
+                return;
+            }
+
+            startupMinimizePending = false;
+            blazorWebView1.WebView.CoreWebView2InitializationCompleted -= StartupWebView_CoreWebView2InitializationCompleted;
+            blazorWebView1.WebView.NavigationCompleted -= StartupWebView_NavigationCompleted;
+
+            try
+            {
+                // Minimize first (which also hides to the tray when enabled) so the
+                // window never becomes opaque on screen before it goes away.
+                WindowState = FormWindowState.Minimized;
+            }
+            finally
+            {
+                Opacity = 1;
             }
         }
 
